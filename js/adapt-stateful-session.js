@@ -1,5 +1,5 @@
 define([
-	'coreJS/adapt',
+	'core/js/adapt',
 	'./serializers/default',
 	'./serializers/questions'
 ], function(Adapt, serializer, questions) {
@@ -8,23 +8,28 @@ define([
 	
 	var AdaptStatefulSession = _.extend({
 
-		_sessionID: null,
 		_config: null,
-		_shouldStoreResponses: false,
+		_shouldStoreResponses: true,
 		_shouldRecordInteractions: true,
 
 	//Session Begin
-		initialize: function() {
+		initialize: function(callback) {
+			this._onWindowUnload = _.bind(this.onWindowUnload, this);
+			
 			this.getConfig();
-			this.restoreSessionState();
-			this.assignSessionId();
-			this.setupEventListeners();
+
+			this.getLearnerInfo();
+			
+			// restore state asynchronously to prevent IE8 freezes
+			this.restoreSessionState(_.bind(function() {
+				// still need to defer call because AdaptModel.check*Status functions are asynchronous
+				_.defer(_.bind(this.setupEventListeners, this));
+				callback();
+			}, this));
 		},
 
 		getConfig: function() {
-			this._config = Adapt.config.has('_spoor')
-				? Adapt.config.get('_spoor')
-				: false;
+			this._config = Adapt.config.has('_spoor') ? Adapt.config.get('_spoor') : false;
 			
 			this._shouldStoreResponses = (this._config && this._config._tracking && this._config._tracking._shouldStoreResponses);
 			
@@ -34,41 +39,57 @@ define([
 			}
 		},
 
+		/**
+		 * replace the hard-coded _learnerInfo data in _globals with the actual data from the LMS
+		 * if the course has been published from the AT, the _learnerInfo object won't exist so we'll need to create it
+		 */
+		getLearnerInfo: function() {
+			var globals = Adapt.course.get('_globals');
+			if (!globals._learnerInfo) {
+				globals._learnerInfo = {};
+			}
+			_.extend(globals._learnerInfo, Adapt.offlineStorage.get("learnerinfo"));
+		},
+
 		saveSessionState: function() {
 			var sessionPairs = this.getSessionState();
 			Adapt.offlineStorage.set(sessionPairs);
 		},
 
-		restoreSessionState: function() {
+		restoreSessionState: function(callback) {
 			var sessionPairs = Adapt.offlineStorage.get();
 			var hasNoPairs = _.keys(sessionPairs).length === 0;
 
-			if (hasNoPairs) return;
+			var doSynchronousPart = _.bind(function() {
+				if (sessionPairs.questions && this._shouldStoreResponses) questions.deserialize(sessionPairs.questions);
+				if (sessionPairs._isCourseComplete) Adapt.course.set('_isComplete', sessionPairs._isCourseComplete);
+				if (sessionPairs._isAssessmentPassed) Adapt.course.set('_isAssessmentPassed', sessionPairs._isAssessmentPassed);
+				callback();
+			}, this);
 
-			if (sessionPairs.completion) serializer.deserialize(sessionPairs.completion);
-			if (sessionPairs.questions && this._shouldStoreResponses) questions.deserialize(sessionPairs.questions);
-			if (sessionPairs._isCourseComplete) Adapt.course.set('_isComplete', sessionPairs._isCourseComplete);
-			if (sessionPairs._isAssessmentPassed) Adapt.course.set('_isAssessmentPassed', sessionPairs._isAssessmentPassed);
+			if (hasNoPairs) return callback();
+
+			// asynchronously restore block completion data because this has been known to be a choke-point resulting in IE8 freezes
+			if (sessionPairs.completion) {
+				serializer.deserialize(sessionPairs.completion, doSynchronousPart);
+			} else {
+				doSynchronousPart();
+			}
 		},
 
 		getSessionState: function() {
 			var sessionPairs = {
 				"completion": serializer.serialize(),
-				"questions": (this._shouldStoreResponses == true ? questions.serialize() : ""),
+				"questions": (this._shouldStoreResponses === true ? questions.serialize() : ""),
 				"_isCourseComplete": Adapt.course.get("_isComplete") || false,
 				"_isAssessmentPassed": Adapt.course.get('_isAssessmentPassed') || false
 			};
 			return sessionPairs;
 		},
 
-		assignSessionId: function () {
-			this._sessionID = Math.random().toString(36).slice(-8);
-		},
-
 	//Session In Progress
 		setupEventListeners: function() {
-			this._onWindowUnload = _.bind(this.onWindowUnload, this);
-			$(window).on('unload', this._onWindowUnload);
+			$(window).on('beforeunload unload', this._onWindowUnload);
 
 			if (this._shouldStoreResponses) {
 				this.listenTo(Adapt.components, 'change:_isInteractionComplete', this.onQuestionComponentComplete);
@@ -81,8 +102,17 @@ define([
 			this.listenTo(Adapt.blocks, 'change:_isComplete', this.onBlockComplete);
 			this.listenTo(Adapt.course, 'change:_isComplete', this.onCompletion);
 			this.listenTo(Adapt, 'assessment:complete', this.onAssessmentComplete);
-			this.listenTo(Adapt, 'questionView:complete', this.onQuestionComplete);
-			this.listenTo(Adapt, 'questionView:reset', this.onQuestionReset);
+			this.listenTo(Adapt, 'app:languageChanged', this.onLanguageChanged);
+		},
+
+		removeEventListeners: function () {
+			$(window).off('beforeunload unload', this._onWindowUnload);
+			this.stopListening();
+		},
+
+		reattachEventListeners: function() {
+			this.removeEventListeners();
+			this.setupEventListeners();
 		},
 
 		onBlockComplete: function(block) {
@@ -104,11 +134,11 @@ define([
 		},
 
 		onAssessmentComplete: function(stateModel) {
-			Adapt.course.set('_isAssessmentPassed', stateModel.isPass)
+			Adapt.course.set('_isAssessmentPassed', stateModel.isPass);
 			
 			this.saveSessionState();
 
-			this.submitScore(stateModel.scoreAsPercent);
+			this.submitScore(stateModel);
 
 			if (stateModel.isPass) {
 				this.onCompletion();
@@ -131,10 +161,30 @@ define([
 			Adapt.offlineStorage.set("interaction", id, response, result, latency, responseType);
 		},
 
-		submitScore: function(score) {
-			if (this._config && !this._config._tracking._shouldSubmitScore) return;
+		/**
+		 * when the user switches language, we need to:
+		 * - reattach the event listeners as the language change triggers a reload of the json, which will create brand new collections
+		 * - get and save a fresh copy of the session state. as the json has been reloaded, the blocks completion data will be reset (the user is warned that this will happen by the language picker extension)
+		 * - check to see if the config requires that the lesson_status be reset to 'incomplete'
+		 */
+		onLanguageChanged: function () {
+			this.reattachEventListeners();
+
+			this.saveSessionState();
 			
-			Adapt.offlineStorage.set("score", score, 0, 100);
+			if (this._config._reporting && this._config._reporting._resetStatusOnLanguageChange === true) {
+				Adapt.offlineStorage.set("status", "incomplete");
+			}
+		},
+
+		submitScore: function(stateModel) {
+			if (this._config && !this._config._tracking._shouldSubmitScore) return;
+
+			if (stateModel.isPercentageBased) {
+				Adapt.offlineStorage.set("score", stateModel.scoreAsPercent, 0, 100);
+			} else {
+				Adapt.offlineStorage.set("score", stateModel.score, 0, stateModel.maxScore);
+			}
 		},
 
 		submitAssessmentFailed: function() {
@@ -143,16 +193,6 @@ define([
 				if (onAssessmentFailure === "") return;
 					
 				Adapt.offlineStorage.set("status", onAssessmentFailure);
-			}
-		},
-
-		onQuestionComplete: function(questionView) {
-			questionView.model.set('_sessionID', this._sessionID);
-		},
-
-		onQuestionReset: function(questionView) {
-			if (this._sessionID !== questionView.model.get('_sessionID')) {
-				questionView.model.set('_isEnabledOnRevisit', true);
 			}
 		},
 		
@@ -176,9 +216,7 @@ define([
 
 	//Session End
 		onWindowUnload: function() {
-			$(window).off('unload', this._onWindowUnload);
-
-			this.stopListening();
+			this.removeEventListeners();
 		}
 		
 	}, Backbone.Events);

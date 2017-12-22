@@ -1,7 +1,7 @@
 define([
-	'coreJS/adapt',
+	'core/js/adapt',
 	'./scorm',
-	'coreJS/offlineStorage'
+	'core/js/offlineStorage'
 ], function(Adapt, scorm) {
 
 	//SCORM handler for Adapt.offlineStorage interface.
@@ -47,7 +47,7 @@ define([
 					return scorm.getStatus();
 				case "student":// for backwards-compatibility. learnerInfo is preferred now and will give you more information
 					return scorm.getStudentName();
-				case "learnerInfo":
+				case "learnerinfo":
 					return this.getLearnerInfo();
 				default:
 					return this.getCustomState(name);
@@ -84,8 +84,14 @@ define([
 				case "status":
 					return scorm.setStatus.apply(scorm, args);
 				case "student":
-				case "learnerInfo":
+				case "learnerinfo":
 					return false;// these properties are read-only
+				case "lang":
+					scorm.setLanguage(value);
+					// fall-through so that lang gets stored in suspend_data as well:
+					// because in SCORM 1.2 cmi.student_preference.language is an optional data element
+					// so we can't rely on the LMS having support for it. 
+					// If it does support it we may as well save the user's choice there purely for reporting purposes
 				case "suspenddata":
 				default:
 					if (isObject) {

@@ -53,6 +53,9 @@ define (function(require) {
         
 		if (window.__debug)
 			this.showDebugWindow();
+
+		if ((window.API && window.API.__offlineAPIWrapper) || (window.API_1484_11 && window.API_1484_11.__offlineAPIWrapper))
+			this.logger.error("Offline SCORM API is being used. No data will be reported to the LMS!");
 	};
 
 	// static
@@ -73,6 +76,7 @@ define (function(require) {
 	};
 
 	ScormWrapper.prototype.setVersion = function(value) {
+		this.logger.debug("ScormWrapper::setVersion: " + value);
 		this.scorm.version = value;
 		/**
 		 * stop the pipwerks code from setting cmi.core.exit to suspend/logout when targeting SCORM 1.2.
@@ -84,6 +88,7 @@ define (function(require) {
 	};
 
 	ScormWrapper.prototype.initialize = function() {
+		this.logger.debug("ScormWrapper::initialize");
 		this.lmsConnected = this.scorm.init();
 
 		if (this.lmsConnected) {
@@ -133,14 +138,15 @@ define (function(require) {
 		if (this.isSCORM2004()) {
 			this.setValue("cmi.success_status", "failed");
 			
-			if(this.setCompletedWhenFailed)
+			if(this.setCompletedWhenFailed) {
 				this.setValue("cmi.completion_status", "completed");
+			}
 		}
 		else {
 			this.setValue("cmi.core.lesson_status", "failed");
 		}
 
-			if(this.commitOnStatusChange) this.commit();
+		if(this.commitOnStatusChange) this.commit();
 	};
 
 	ScormWrapper.prototype.getStatus = function() {
@@ -156,7 +162,6 @@ define (function(require) {
 			case "not_attempted":// mentioned in SCORM 2004 docs but not sure it ever gets used
 			case "unknown": //the SCORM 2004 version of not attempted
 				return status;
-			break;
 			default:
 				this.handleError("ScormWrapper::getStatus: invalid lesson status '" + status + "' received from LMS");
 				return null;
@@ -165,23 +170,22 @@ define (function(require) {
 
 	ScormWrapper.prototype.setStatus = function(status) {
 		switch (status.toLowerCase()){
-        case "incomplete":
-          this.setIncomplete();
-          break;
-        case "completed":
-          this.setCompleted();
-          break;
-        case "passed":
-          this.setPassed();
-          break;
-        case "failed":
-          this.setFailed();
-          break;
-        default:
-          this.handleError("ScormWrapper::setStatus: the status '" + status + "' is not supported.");
-          break;
-      }
-	}
+			case "incomplete":
+				this.setIncomplete();
+			break;
+			case "completed":
+				this.setCompleted();
+			break;
+			case "passed":
+				this.setPassed();
+			break;
+			case "failed":
+				this.setFailed();
+			break;
+			default:
+				this.handleError("ScormWrapper::setStatus: the status '" + status + "' is not supported.");
+		}
+	};
 
 	ScormWrapper.prototype.getScore = function() {
 		return this.getValue(this.isSCORM2004() ? "cmi.score.raw" : "cmi.core.score.raw");
@@ -189,7 +193,13 @@ define (function(require) {
 
 	ScormWrapper.prototype.setScore = function(_score, _minScore, _maxScore) {
 		if (this.isSCORM2004()) {
-			this.setValue("cmi.score.raw", _score) && this.setValue("cmi.score.min", _minScore) && this.setValue("cmi.score.max", _maxScore) && this.setValue("cmi.score.scaled", _score / 100);
+			this.setValue("cmi.score.raw", _score);
+			this.setValue("cmi.score.min", _minScore);
+			this.setValue("cmi.score.max", _maxScore);
+
+			var range = _maxScore - _minScore;
+			var scaledScore = ((_score - _minScore) / range).toFixed(7);
+			this.setValue("cmi.score.scaled", scaledScore);
 		}
 		else {
 			this.setValue("cmi.core.score.raw", _score);
@@ -222,6 +232,16 @@ define (function(require) {
 
 	ScormWrapper.prototype.getStudentId = function(){
 		return this.getValue(this.isSCORM2004() ? "cmi.learner_id":"cmi.core.student_id");
+	};
+	
+	ScormWrapper.prototype.setLanguage = function(_lang){
+		if(this.isSCORM2004()) {
+			this.setValue("cmi.learner_preference.language", _lang);
+		} else {
+			if(this.isSupported("cmi.student_preference.language")) {
+				this.setValue("cmi.student_preference.language", _lang);
+			}
+		}
 	};
 
 	ScormWrapper.prototype.commit = function() {
@@ -264,7 +284,7 @@ define (function(require) {
 		if (this.lmsConnected && !this.finishCalled) {
 			this.finishCalled = true;
 			
-			if(this.timedCommitIntervalID != null) {
+			if(this.timedCommitIntervalID !== null) {
 				window.clearInterval(this.timedCommitIntervalID);
 			}
 			
@@ -375,10 +395,10 @@ define (function(require) {
 			var _errorMsg = "";
 			
 			if (!_success) {
-			/*
-			* Some LMSes have an annoying tendency to return false from a set call even when it actually worked fine.
-			* So, we should throw an error _only_ if there was a valid error code...
-			*/
+				/*
+				* Some LMSes have an annoying tendency to return false from a set call even when it actually worked fine.
+				* So, we should throw an error _only_ if there was a valid error code...
+				*/
 				if(_errorCode !== 0) {
 					_errorMsg += "Course could not set " + _property + " to " + _value;
 					_errorMsg += "\nError Info: " + this.scorm.debug.getInfo(_errorCode);
@@ -455,11 +475,8 @@ define (function(require) {
 			this.showDebugWindow();
 	};
 
-
 	ScormWrapper.prototype.getInteractionCount = function(){
-
 		var count = this.getValue("cmi.interactions._count");
-
 		return count === "" ? 0 : count;
 	};
 	
@@ -527,7 +544,7 @@ define (function(require) {
 		var maxLength = this.isSCORM2004() ? 250 : 255;
 
 		if(response.length > maxLength) {
-			response = response.substr(0,maxLength);
+			response = response.substr(0, maxLength);
 
 			this.logger.warn("ScormWrapper::recordInteractionFillIn: response data for " + id + " is longer than the maximum allowed length of " + maxLength + " characters; data will be truncated to avoid an error.");
 		}
@@ -543,7 +560,7 @@ define (function(require) {
 			this.logOutputWin.close();
 		}
 		
-		this.logOutputWin = window.open("log_output.html", "Log", "width=600,height=300,status=no,scrollbars=yes,resize=yes,menubar=yes,toolbar=yes,location=yes,top=0,left=0");
+		this.logOutputWin = window.open("log_output.html", "Log", "width=600,height=300,status=no,scrollbars=yes,resizable=yes,menubar=yes,toolbar=yes,location=yes,top=0,left=0");
 		
 		if (this.logOutputWin)
 			this.logOutputWin.focus();
@@ -581,45 +598,40 @@ define (function(require) {
 
 	/**
 	* Converts milliseconds into the SCORM 2004 data type 'timeinterval (second, 10,2)'
-	* this will output something like 'PT2H5M10S' a value which indicates a period of time of 2 hours, 5 minutes & 10 seconds
+	* this will output something like 'P1DT3H5M0S' which indicates a period of time of 1 day, 3 hours and 5 minutes
+	* or 'PT2M10.1S' which indicates a period of time of 2 minutes and 10.1 seconds
 	*/
 	ScormWrapper.prototype.convertToSCORM2004Time = function(msConvert) {
-
-		var timeinterval = "";
-		var csConvert = Math.floor(msConvert / 10)
-
+		var csConvert = Math.floor(msConvert / 10);
 		var csPerSec = 100;
 		var csPerMin = csPerSec * 60;
 		var csPerHour = csPerMin * 60;
 		var csPerDay = csPerHour * 24;
 
 		var days = Math.floor(csConvert/ csPerDay);
-		csConvert -= days * csPerDay
-		days = days ? days+"D" : "";
+		csConvert -= days * csPerDay;
+		days = days ? days + "D" : "";
 
 		var hours = Math.floor(csConvert/ csPerHour);
-		csConvert -= hours * csPerHour
-		hours = hours ? hours+"H" : "";
+		csConvert -= hours * csPerHour;
+		hours = hours ? hours + "H" : "";
 
 		var mins = Math.floor(csConvert/ csPerMin);
-		csConvert -= mins * csPerMin
-		mins = mins ? mins+"M" : "";
+		csConvert -= mins * csPerMin;
+		mins = mins ? mins + "M" : "";
 
 		var secs = Math.floor(csConvert/ csPerSec);
-		csConvert -= secs * csPerSec
-		secs = secs ? secs+"S" : "";
+		csConvert -= secs * csPerSec;
+		secs = secs ? secs : "0";
 
 		var cs = csConvert;
-		cs = cs ? "."+cs+"S" : "";
-
-		var hms = [hours,mins,secs,cs].join("");
-
-		hms = hms.length ? "T" + hms: hms;
-
-		timeinterval = days + hms;
-		timeinterval = timeinterval.length ? timeinterval : "0S";
-
-		return "P" + timeinterval;
+		cs = cs ? "." + cs : "";
+		
+		var seconds = secs + cs + "S";
+		
+		var hms = [hours,mins,seconds].join("");
+		
+		return "P" + days + "T" + hms;
 	};
 
 	ScormWrapper.prototype.getCMITime = function() {
@@ -633,31 +645,19 @@ define (function(require) {
 		return [hours, min, sec].join(":");
 	};
 
-	ScormWrapper.prototype.getISO8601Timestamp = function() {
-	
-		var date = new Date();
-		
-		var ymd = [
-			date.getFullYear(),
-			this.padWithZeroes(date.getMonth()+1,2),
-			this.padWithZeroes(date.getDate(),2)
-		].join("-");
-
-		var hms = [
-			this.padWithZeroes(date.getHours(),2),
-			this.padWithZeroes(date.getMinutes(),2),
-			this.padWithZeroes(date.getSeconds(),2)
-		].join(":");
-
-
-		return ymd+"T"+hms;
+	/**
+	* returns the current date & time in the format YYYY-MM-DDTHH:mm:ss 
+	*/
+	ScormWrapper.prototype.getISO8601Timestamp = function() {		
+		var date = new Date().toISOString();
+		return date.replace(/.\d\d\dZ/, "");//Date.toISOString returns the date in the format YYYY-MM-DDTHH:mm:ss.sssZ so we need to drop the last bit to make it SCORM 2004 conformant
 	};
 
 	ScormWrapper.prototype.padWithZeroes = function(numToPad, padBy) {
 
 		var len = padBy;
 
-		while(--len){ numToPad = "0" + numToPad }
+		while(--len){ numToPad = "0" + numToPad; }
 
 		return numToPad.slice(-padBy);
 	};
